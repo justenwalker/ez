@@ -31,7 +31,7 @@ func IsFinite[D any](stream Stream[D]) bool {
 }
 
 // AssertFinite asserts that the given stream is finite.
-// If it is not, this function panics with ErrInfiniteSequence
+// NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
 func AssertFinite[D any](stream Stream[D]) Stream[D] {
 	if !IsFinite[D](stream) {
 		panic(ErrInfiniteSequence)
@@ -49,6 +49,7 @@ type Finite interface {
 // AssumeFinite converts a given Stream into a Finite Stream.
 // The caller guarantees that the stream given is finite.
 // If the stream given is not finite, the behavior is undefined, but likely will result in a program hang/crash.
+// If the given stream is already finite, ie: IsFinite(stream) == true, then this function returns its input unchanged.
 func AssumeFinite[D any](stream Stream[D]) Stream[D] {
 	if IsFinite[D](stream) {
 		return stream
@@ -57,19 +58,22 @@ func AssumeFinite[D any](stream Stream[D]) Stream[D] {
 }
 
 // SliceStream returns a Finite Stream backed by the given slice of data elements.
-// Since slices are finite, the stream returned by this function is also finite.
+// Since slices are finite, the stream returned by this function is Finite.
+// Since slices have a known size, the stream returned by this function has Size.
 func SliceStream[D any](values []D) Stream[D] {
 	return &sliceStream[D]{values: values}
 }
 
 // FiniteStream returns a Finite Stream backed by the given sequence.
 // The sequence provided is assumed to be finite.
+// If the sequence given is not finite, the behavior is undefined, but likely will result in a program hang/crash.
 func FiniteStream[D any](seq iter.Seq[D]) Stream[D] {
 	return &finiteSeqStream[D]{seq: seq}
 }
 
 // FiniteStreamWithSize returns a Finite Stream backed by the given sequence for which the size is known.
-// The sequence provided is assumed to be finite and have the exact number of data elements given.
+// The sequence provided is assumed to be finite and have a most number of data elements given.
+// If the sequence given is not finite, the behavior is undefined.
 func FiniteStreamWithSize[D any](seq iter.Seq[D], size int) Stream[D] {
 	return &finiteSizeStream[D]{seq: seq, size: size}
 }
@@ -84,7 +88,7 @@ func InfiniteStream[D any](seq iter.Seq[D]) Stream[D] {
 // If the Stream implements `Collect() []D`, that implementation is used.
 // Otherwise, this function collects all elements of the Stream's sequence.
 // If the Stream implements `Size() int`, it can be used to reduce allocations, since the slice can be pre-allocated.
-// NOTE: This function panics if the given stream is not Finite.
+// NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
 func Collect[D any](stream Stream[D]) []D {
 	stream = AssertFinite(stream)
 	type collector interface {
@@ -115,7 +119,7 @@ func Pipe[D any](stream Stream[D], pipeFunc ...func(iter Stream[D]) Stream[D]) S
 }
 
 // Shuffle returns a new Stream with data in a randomized order.
-// NOTE: If the stream is not finite, this function will panic.
+// NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
 func Shuffle[D any](stream Stream[D]) Stream[D] {
 	values := Collect(stream)
 	rand.Shuffle(len(values), func(i, j int) {
@@ -126,7 +130,7 @@ func Shuffle[D any](stream Stream[D]) Stream[D] {
 }
 
 // ShuffleWithRand returns a new Stream with data in a randomized order determined by the given random number generator.
-// NOTE: If the stream is not finite, this function will panic.
+// NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
 func ShuffleWithRand[D any](rng *rand.Rand) func(stream Stream[D]) Stream[D] {
 	return func(stream Stream[D]) Stream[D] {
 		values := Collect(stream)
@@ -166,7 +170,7 @@ func Skip[D any](n int) func(stream Stream[D]) Stream[D] {
 
 // Take returns a new stream which takes at most 'N' elements from the stream.
 // Since take puts an upper bound on the elements returned by the stream, the returned
-// Stream is guaranteed to be finite.
+// Stream is guaranteed to be Finite.
 func Take[D any](n int) func(stream Stream[D]) Stream[D] {
 	return func(stream Stream[D]) Stream[D] {
 		return &finiteSizeStream[D]{
@@ -188,7 +192,7 @@ func Take[D any](n int) func(stream Stream[D]) Stream[D] {
 
 // Concat concatenates one or more streams together.
 // If all the Streams given are Finite, the resulting concatenation is also Finite.
-// If all the streams given has a Size, then the resulting Stream is Finite, and also has a Size.
+// If all the streams given have Size, then the resulting Stream is Finite, and also has a Size.
 func Concat[D any](streams ...Stream[D]) Stream[D] {
 	finite := true
 	var size int
@@ -225,7 +229,7 @@ func Concat[D any](streams ...Stream[D]) Stream[D] {
 }
 
 // Reverse returns a new stream with the data elements in reverse order.
-// NOTE: if the given stream is not finite, this function will panic.
+// NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
 func Reverse[D any](stream Stream[D]) Stream[D] {
 	values := Collect(stream)
 	slices.Reverse(values)
@@ -238,7 +242,7 @@ func SortOrdered[D cmp.Ordered](stream Stream[D]) Stream[D] {
 }
 
 // Sort returns a new stream with the data elements in sorted order.
-// NOTE: if the given stream is not Finite, this function will panic.
+// NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
 func Sort[D any](less func(a, b D) bool) func(stream Stream[D]) Stream[D] {
 	return func(stream Stream[D]) Stream[D] {
 		values := Collect(stream)
@@ -285,7 +289,7 @@ func Map[D any](mapFn func(v D) D) func(stream Stream[D]) Stream[D] {
 	}
 }
 
-// Distinct returns a new Stream that filters out duplicate elements.
+// Distinct returns a new stream containing only the distinct elements of the original stream by filtering out duplicates.
 // NOTE: the memory consumed by this stream is unbounded if the Stream is not Finite.
 func Distinct[D comparable](stream Stream[D]) Stream[D] {
 	seen := make(map[D]struct{})
@@ -299,7 +303,7 @@ func Distinct[D comparable](stream Stream[D]) Stream[D] {
 	})(stream)
 }
 
-// Convert takes a stream of one type of data value D and converts it to a stream of another type R.
+// Convert converts a stream of type D to a stream of type R using the provided conversion function.
 func Convert[D, R any](stream Stream[D], convertFunc func(v D) R) Stream[R] {
 	seq := func(yield func(R) bool) {
 		for v := range stream.Seq() {
@@ -314,8 +318,8 @@ func Convert[D, R any](stream Stream[D], convertFunc func(v D) R) Stream[R] {
 	return InfiniteStream(seq)
 }
 
-// Size returns the number of elements in the stream, if the stream has this capability.
-// For Infinite Streams, and Finite streams for which the size is unknown; it returns -1.
+// Size returns the maximum number of elements in the stream, if the stream has a Size method.
+// It returns -1 if the Stream size is unknown; for instance: an InfiniteStream, or FiniteStream with no size.
 func Size[D any](stream Stream[D]) int {
 	type sizer interface {
 		Size() int
@@ -326,63 +330,78 @@ func Size[D any](stream Stream[D]) int {
 	return -1
 }
 
-// Reduce applies a reducing function to the elements of the Stream, starting with an initial value, and returns the result.
-func Reduce[D any](stream Stream[D], initial D, reducer func(acc D, v D) D) D {
-	for v := range stream.Seq() {
-		initial = reducer(initial, v)
+// Reduce processes elements of a stream sequentially and applies an accumulator function to reduce them to a single value.
+func Reduce[D any](stream Stream[D], initial D, accumFunc func(acc D, d D) D) D {
+	for d := range stream.Seq() {
+		initial = accumFunc(initial, d)
 	}
 	return initial
 }
 
+// seqStream implements Stream for a potentially infinite iter.Seq of any type.
 type seqStream[D any] struct {
 	seq iter.Seq[D]
 }
 
+// Seq returns the sequence of the current data stream.
 func (it *seqStream[D]) Seq() iter.Seq[D] {
 	return it.seq
 }
 
+// finiteSizeStream represents a finite stream with a known, fixed size.
+// seq holds the sequence of elements in the stream.
+// size denotes the number of elements in the finite stream.
 type finiteSizeStream[D any] struct {
 	seq  iter.Seq[D]
 	size int
 }
 
+// Size returns the size of the finiteSizeStream.
 func (it *finiteSizeStream[D]) Size() int {
 	return it.size
 }
 
+// Finite returns true indicating that the stream has a finite size.
 func (it *finiteSizeStream[D]) Finite() bool {
 	return true
 }
 
+// Seq returns the internal sequence of the finite size stream.
 func (it *finiteSizeStream[D]) Seq() iter.Seq[D] {
 	return it.seq
 }
 
+// finiteSeqStream represents a finite sequence stream of elements of any type.
 type finiteSeqStream[D any] struct {
 	seq iter.Seq[D]
 }
 
+// Seq returns the underlying sequence of type iter.Seq[D] from the finiteSeqStream instance.
 func (it *finiteSeqStream[D]) Seq() iter.Seq[D] {
 	return it.seq
 }
 
+// Finite returns true indicating that the stream has a finite size.
 func (it *finiteSeqStream[D]) Finite() bool {
 	return true
 }
 
+// sliceStream represents a finite stream backed by a slice of data elements.
 type sliceStream[D any] struct {
 	values []D
 }
 
+// Finite returns true indicating that the stream has a finite size.
 func (it *sliceStream[D]) Finite() bool {
 	return true
 }
 
+// Size returns the number of elements in the sliceStream.
 func (it *sliceStream[D]) Size() int {
 	return len(it.values)
 }
 
+// Seq converts the backing slice []D to an iter.Seq[D]
 func (it *sliceStream[D]) Seq() iter.Seq[D] {
 	return func(yield func(D) bool) {
 		for _, v := range it.values {
@@ -393,6 +412,7 @@ func (it *sliceStream[D]) Seq() iter.Seq[D] {
 	}
 }
 
+// Collect returns a slice containing all elements of the sliceStream.
 func (it *sliceStream[D]) Collect() []D {
 	vs := make([]D, len(it.values))
 	copy(vs, it.values)
