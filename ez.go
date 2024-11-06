@@ -11,32 +11,24 @@ import (
 	"iter"
 	"math/rand/v2"
 	"slices"
-	"sort"
 )
 
 // ErrInfiniteSequence indicates that an operation requiring a finite Stream has been given an InfiniteStream.
 // Certain operations like Collect and Reverse only work on Finite streams.
 var ErrInfiniteSequence = errors.New("infinite sequence")
 
-// Stream represents a sequence of elements supporting sequential and parallel aggregate operations.
-type Stream[D any] interface {
-	// Seq returns the internal data sequence.
-	Seq() iter.Seq[D]
-}
-
 // IsFinite checks whether a given Stream is finite by asserting if it implements the Finite interface.
-func IsFinite[D any](stream Stream[D]) bool {
+func IsFinite(stream any) bool {
 	v, ok := stream.(Finite)
 	return ok && v.Finite()
 }
 
 // AssertFinite asserts that the given stream is finite.
 // NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
-func AssertFinite[D any](stream Stream[D]) Stream[D] {
-	if !IsFinite[D](stream) {
+func AssertFinite(stream any) {
+	if !IsFinite(stream) {
 		panic(ErrInfiniteSequence)
 	}
-	return stream
 }
 
 // Finite is a marker interface to detect if a Stream is finite.
@@ -46,51 +38,13 @@ type Finite interface {
 	Finite() bool
 }
 
-// AssumeFinite converts a given Stream into a Finite Stream.
-// The caller guarantees that the stream given is finite.
-// If the stream given is not finite, the behavior is undefined, but likely will result in a program hang/crash.
-// If the given stream is already finite, ie: IsFinite(stream) == true, then this function returns its input unchanged.
-func AssumeFinite[D any](stream Stream[D]) Stream[D] {
-	if IsFinite[D](stream) {
-		return stream
-	}
-	return &finiteSeqStream[D]{seq: stream.Seq()}
-}
-
-// SliceStream returns a Finite Stream backed by the given slice of data elements.
-// Since slices are finite, the stream returned by this function is Finite.
-// Since slices have a known size, the stream returned by this function has Size.
-func SliceStream[D any](values []D) Stream[D] {
-	return &sliceStream[D]{values: values}
-}
-
-// FiniteStream returns a Finite Stream backed by the given sequence.
-// The sequence provided is assumed to be finite.
-// If the sequence given is not finite, the behavior is undefined, but likely will result in a program hang/crash.
-func FiniteStream[D any](seq iter.Seq[D]) Stream[D] {
-	return &finiteSeqStream[D]{seq: seq}
-}
-
-// FiniteStreamWithSize returns a Finite Stream backed by the given sequence for which the size is known.
-// The sequence provided is assumed to be finite and have a most number of data elements given.
-// If the sequence given is not finite, the behavior is undefined.
-func FiniteStreamWithSize[D any](seq iter.Seq[D], size int) Stream[D] {
-	return &finiteSizeStream[D]{seq: seq, size: size}
-}
-
-// InfiniteStream returns a new Stream containing an infinite data sequence.
-// This function is used when the underlying sequence does not have a predefined end.
-func InfiniteStream[D any](seq iter.Seq[D]) Stream[D] {
-	return &seqStream[D]{seq: seq}
-}
-
 // Collect returns a slice of all the elements collected from the stream.
 // If the Stream implements `Collect() []D`, that implementation is used.
 // Otherwise, this function collects all elements of the Stream's sequence.
 // If the Stream implements `Size() int`, it can be used to reduce allocations, since the slice can be pre-allocated.
 // NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
 func Collect[D any](stream Stream[D]) []D {
-	stream = AssertFinite(stream)
+	AssertFinite(stream)
 	type collector interface {
 		Collect() []D
 	}
@@ -118,6 +72,14 @@ func Pipe[D any](stream Stream[D], pipeFunc ...func(iter Stream[D]) Stream[D]) S
 	return stream
 }
 
+// Pipe2 returns a Stream2 after the provided operations have been applied to it in sequence.
+func Pipe2[K any, V any](stream Stream2[K, V], pipeFunc ...func(iter Stream2[K, V]) Stream2[K, V]) Stream2[K, V] {
+	for _, pf := range pipeFunc {
+		stream = pf(stream)
+	}
+	return stream
+}
+
 // Shuffle returns a new Stream with data in a randomized order.
 // NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
 func Shuffle[D any](stream Stream[D]) Stream[D] {
@@ -127,6 +89,17 @@ func Shuffle[D any](stream Stream[D]) Stream[D] {
 	})
 	return SliceStream(values)
 
+}
+
+// Shuffle2 returns a new Stream2 with data in a randomized order.
+// NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
+func Shuffle2[L, R any](stream2 Stream2[L, R]) Stream2[L, R] {
+	left, right := Collect2(stream2)
+	rand.Shuffle(len(left), func(i, j int) {
+		left[i], left[j] = left[j], left[i]
+		right[i], right[j] = right[j], right[i]
+	})
+	return ZipSliceStream2(left, right)
 }
 
 // ShuffleWithRand returns a new Stream with data in a randomized order determined by the given random number generator.
@@ -141,13 +114,25 @@ func ShuffleWithRand[D any](rng *rand.Rand) func(stream Stream[D]) Stream[D] {
 	}
 }
 
+// Shuffle2WithRand returns a new Stream2 with data in a randomized order determined by the given random number generator.
+// NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
+func Shuffle2WithRand[L, R any](rng *rand.Rand, stream2 Stream2[L, R]) Stream2[L, R] {
+	left, right := Collect2(stream2)
+	rng.Shuffle(len(left), func(i, j int) {
+		left[i], left[j] = left[j], left[i]
+		right[i], right[j] = right[j], right[i]
+	})
+	return ZipSliceStream2(left, right)
+}
+
 // Skip returns a new stream with the first n elements skipped.
 func Skip[D any](n int) func(stream Stream[D]) Stream[D] {
 	return func(stream Stream[D]) Stream[D] {
 		seq := func(yield func(D) bool) {
+			skip := n
 			for v := range stream.Seq() {
-				n--
-				if n >= 0 {
+				if skip > 0 {
+					skip--
 					continue
 				}
 				if !yield(v) {
@@ -168,6 +153,34 @@ func Skip[D any](n int) func(stream Stream[D]) Stream[D] {
 	}
 }
 
+// Skip2 returns a new Stream2 with the first n elements skipped.
+func Skip2[L any, R any](n int) func(stream2 Stream2[L, R]) Stream2[L, R] {
+	return func(stream Stream2[L, R]) Stream2[L, R] {
+		seq2 := func(yield func(L, R) bool) {
+			skip := n
+			for l, r := range stream.Seq2() {
+				if skip > 0 {
+					skip--
+					continue
+				}
+				if !yield(l, r) {
+					return
+				}
+			}
+		}
+		if sz := Size(stream); sz != -1 {
+			if sz-n <= 0 {
+				return ZipSliceStream2[L, R](nil, nil)
+			}
+			return FiniteStream2WithSize(seq2, sz-n)
+		}
+		if IsFinite(stream) {
+			return FiniteStream2(seq2)
+		}
+		return InfiniteStream2(seq2)
+	}
+}
+
 // Take returns a new stream which takes at most 'N' elements from the stream.
 // Since take puts an upper bound on the elements returned by the stream, the returned
 // Stream is guaranteed to be Finite.
@@ -176,14 +189,38 @@ func Take[D any](n int) func(stream Stream[D]) Stream[D] {
 		return &finiteSizeStream[D]{
 			size: n,
 			seq: func(yield func(D) bool) {
+				take := n
 				for v := range stream.Seq() {
+					if take <= 0 {
+						return
+					}
 					if !yield(v) {
 						return
 					}
-					n--
-					if n <= 0 {
+					take--
+				}
+			},
+		}
+	}
+}
+
+// Take2 returns a new Stream2 which takes at most 'N' elements from the stream.
+// Since take puts an upper bound on the elements returned by the stream, the returned
+// Stream2 is guaranteed to be Finite.
+func Take2[L, R any](n int) func(stream2 Stream2[L, R]) Stream2[L, R] {
+	return func(stream Stream2[L, R]) Stream2[L, R] {
+		return &finiteStream2WithSize[L, R]{
+			size: n,
+			seq2: func(yield func(L, R) bool) {
+				take := n
+				for l, r := range stream.Seq2() {
+					if take <= 0 {
 						return
 					}
+					if !yield(l, r) {
+						return
+					}
+					take--
 				}
 			},
 		}
@@ -228,6 +265,44 @@ func Concat[D any](streams ...Stream[D]) Stream[D] {
 	return InfiniteStream(seq)
 }
 
+// Concat2 concatenates one or more streams together.
+// If all the Streams given are Finite, the resulting concatenation is also Finite.
+// If all the streams given have Size, then the resulting Stream is Finite, and also has a Size.
+func Concat2[L, R any](streams ...Stream2[L, R]) Stream2[L, R] {
+	finite := true
+	var size int
+	hasSize := true
+	for _, stream := range streams {
+		if !IsFinite(stream) {
+			finite = false
+			hasSize = false
+			break
+		}
+		n := Size(stream)
+		if n == -1 {
+			hasSize = false
+			break
+		}
+		size += n
+	}
+	seq2 := func(yield func(L, R) bool) {
+		for _, a := range streams {
+			for l, r := range a.Seq2() {
+				if !yield(l, r) {
+					return
+				}
+			}
+		}
+	}
+	if hasSize {
+		return FiniteStream2WithSize(seq2, size)
+	}
+	if finite {
+		return FiniteStream2(seq2)
+	}
+	return InfiniteStream2(seq2)
+}
+
 // Reverse returns a new stream with the data elements in reverse order.
 // NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
 func Reverse[D any](stream Stream[D]) Stream[D] {
@@ -236,24 +311,31 @@ func Reverse[D any](stream Stream[D]) Stream[D] {
 	return SliceStream(values)
 }
 
-// SortOrdered sorts Ordered types by their natural order, ascending.
-func SortOrdered[D cmp.Ordered](stream Stream[D]) Stream[D] {
-	return Sort(cmp.Less[D])(stream)
+// Reverse2 returns a new stream with the data elements in reverse order.
+// NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
+func Reverse2[L, R any](stream Stream2[L, R]) Stream2[L, R] {
+	left, right := Collect2(stream)
+	slices.Reverse(left)
+	slices.Reverse(right)
+	return ZipSliceStream2(left, right)
+}
+
+// Ordered sorts Ordered types by their natural order, ascending.
+func Ordered[D cmp.Ordered](stream Stream[D]) Stream[D] {
+	return Sort(cmp.Compare[D])(stream)
 }
 
 // Sort returns a new stream with the data elements in sorted order.
 // NOTE: If stream is not finite, this function will panic with ErrInfiniteSequence.
-func Sort[D any](less func(a, b D) bool) func(stream Stream[D]) Stream[D] {
+func Sort[D any](cmp func(a, b D) int) func(stream Stream[D]) Stream[D] {
 	return func(stream Stream[D]) Stream[D] {
 		values := Collect(stream)
-		sort.Slice(values, func(i, j int) bool {
-			return less(values[i], values[j])
-		})
+		slices.SortFunc(values, cmp)
 		return SliceStream(values)
 	}
 }
 
-// Filter returns a new stream with all values for which the predicate returns true.
+// Filter returns a new stream with all m for which the predicate returns true.
 func Filter[D any](predicate func(v D) bool) func(stream Stream[D]) Stream[D] {
 	return func(stream Stream[D]) Stream[D] {
 		seq := func(yield func(D) bool) {
@@ -272,7 +354,26 @@ func Filter[D any](predicate func(v D) bool) func(stream Stream[D]) Stream[D] {
 	}
 }
 
-// Map maps values in one stream to values in another stream of the same type.
+// Filter2 returns a new stream with all m for which the predicate returns true.
+func Filter2[L, R any](predicate func(l L, r R) bool) func(stream Stream2[L, R]) Stream2[L, R] {
+	return func(stream Stream2[L, R]) Stream2[L, R] {
+		seq2 := func(yield func(L, R) bool) {
+			for l, r := range stream.Seq2() {
+				if predicate(l, r) {
+					if !yield(l, r) {
+						return
+					}
+				}
+			}
+		}
+		if IsFinite(stream) {
+			return FiniteStream2(seq2)
+		}
+		return InfiniteStream2(seq2)
+	}
+}
+
+// Map maps m in one stream to m in another stream of the same type.
 func Map[D any](mapFn func(v D) D) func(stream Stream[D]) Stream[D] {
 	return func(stream Stream[D]) Stream[D] {
 		seq := func(yield func(D) bool) {
@@ -286,6 +387,23 @@ func Map[D any](mapFn func(v D) D) func(stream Stream[D]) Stream[D] {
 			return FiniteStream(seq)
 		}
 		return InfiniteStream(seq)
+	}
+}
+
+// Map2 maps m in one stream to m in another stream of the same type.
+func Map2[L, R any](mapFn func(l L, r R) (L, R)) func(stream2 Stream2[L, R]) Stream2[L, R] {
+	return func(stream2 Stream2[L, R]) Stream2[L, R] {
+		seq2 := func(yield func(L, R) bool) {
+			for l, r := range stream2.Seq2() {
+				if !yield(mapFn(l, r)) {
+					return
+				}
+			}
+		}
+		if IsFinite(stream2) {
+			return FiniteStream2(seq2)
+		}
+		return InfiniteStream2(seq2)
 	}
 }
 
@@ -318,9 +436,25 @@ func Convert[D, R any](stream Stream[D], convertFunc func(v D) R) Stream[R] {
 	return InfiniteStream(seq)
 }
 
+// Convert2 converts a Stream2 of one type to a Stream2 of another type  using convertFunc.
+func Convert2[L1 any, R1 any, L2 any, R2 any](stream2 Stream2[L1, R1], convertFunc func(v1 L1, v2 R1) (L2, R2)) Stream2[L2, R2] {
+	seq := func(yield func(L2, R2) bool) {
+		for l1, r1 := range stream2.Seq2() {
+			l2, r2 := convertFunc(l1, r1)
+			if !yield(l2, r2) {
+				return
+			}
+		}
+	}
+	if IsFinite(stream2) {
+		return FiniteStream2(seq)
+	}
+	return InfiniteStream2(seq)
+}
+
 // Size returns the maximum number of elements in the stream, if the stream has a Size method.
 // It returns -1 if the Stream size is unknown; for instance: an InfiniteStream, or FiniteStream with no size.
-func Size[D any](stream Stream[D]) int {
+func Size(stream any) int {
 	type sizer interface {
 		Size() int
 	}
@@ -338,83 +472,100 @@ func Reduce[D any](stream Stream[D], initial D, accumFunc func(acc D, d D) D) D 
 	return initial
 }
 
-// seqStream implements Stream for a potentially infinite iter.Seq of any type.
-type seqStream[D any] struct {
-	seq iter.Seq[D]
+// Left extracts the left values from the given Stream2 and returns them as a Stream.
+func Left[L any, R any](stream2 Stream2[L, R]) Stream[L] {
+	return &seqStream[L]{
+		seq: func(yield func(L) bool) {
+			for k, _ := range stream2.Seq2() {
+				if !yield(k) {
+					return
+				}
+			}
+		},
+	}
 }
 
-// Seq returns the sequence of the current data stream.
-func (it *seqStream[D]) Seq() iter.Seq[D] {
-	return it.seq
+// Right extracts the right values from a given Stream2 and returns them as a Stream.
+func Right[L any, R any](stream2 Stream2[L, R]) Stream[R] {
+	return &seqStream[R]{
+		seq: func(yield func(R) bool) {
+			for _, v := range stream2.Seq2() {
+				if !yield(v) {
+					return
+				}
+			}
+		},
+	}
 }
 
-// finiteSizeStream represents a finite stream with a known, fixed size.
-// seq holds the sequence of elements in the stream.
-// size denotes the number of elements in the finite stream.
-type finiteSizeStream[D any] struct {
-	seq  iter.Seq[D]
-	size int
+func Collect2[L any, R any](stream2 Stream2[L, R]) (left []L, right []R) {
+	AssertFinite(stream2)
+	if sz := Size(stream2); sz != -1 {
+		left = make([]L, 0, sz)
+		right = make([]R, 0, sz)
+	}
+	for k, v := range stream2.Seq2() {
+		left = append(left, k)
+		right = append(right, v)
+	}
+	return left, right
 }
 
-// Size returns the size of the finiteSizeStream.
-func (it *finiteSizeStream[D]) Size() int {
-	return it.size
-}
-
-// Finite returns true indicating that the stream has a finite size.
-func (it *finiteSizeStream[D]) Finite() bool {
-	return true
-}
-
-// Seq returns the internal sequence of the finite size stream.
-func (it *finiteSizeStream[D]) Seq() iter.Seq[D] {
-	return it.seq
-}
-
-// finiteSeqStream represents a finite sequence stream of elements of any type.
-type finiteSeqStream[D any] struct {
-	seq iter.Seq[D]
-}
-
-// Seq returns the underlying sequence of type iter.Seq[D] from the finiteSeqStream instance.
-func (it *finiteSeqStream[D]) Seq() iter.Seq[D] {
-	return it.seq
-}
-
-// Finite returns true indicating that the stream has a finite size.
-func (it *finiteSeqStream[D]) Finite() bool {
-	return true
-}
-
-// sliceStream represents a finite stream backed by a slice of data elements.
-type sliceStream[D any] struct {
-	values []D
-}
-
-// Finite returns true indicating that the stream has a finite size.
-func (it *sliceStream[D]) Finite() bool {
-	return true
-}
-
-// Size returns the number of elements in the sliceStream.
-func (it *sliceStream[D]) Size() int {
-	return len(it.values)
-}
-
-// Seq converts the backing slice []D to an iter.Seq[D]
-func (it *sliceStream[D]) Seq() iter.Seq[D] {
-	return func(yield func(D) bool) {
-		for _, v := range it.values {
-			if !yield(v) {
+// Zip returns a Stream2 produced by zipping a key and value stream together.
+// If the both streams are infinite, the returns Stream2 is also infinite.
+// If any of the given streams is finite, then a finite Stream2 will be returned
+// having a length of the smallest size between the two streams.
+func Zip[L any, R any](left Stream[L], right Stream[R]) Stream2[L, R] {
+	seq2 := func(yield func(L, R) bool) {
+		next, stop := iter.Pull(right.Seq())
+		defer stop()
+		for k := range left.Seq() {
+			v, ok := next()
+			if !ok {
+				return
+			}
+			if !yield(k, v) {
 				return
 			}
 		}
 	}
+	sz1, sz2 := Size(left), Size(right)
+	if sz1 != -1 && sz2 != -1 { // both stream have a size
+		// so the resulting stream is the lesser of the two sizes.
+		FiniteStream2WithSize(seq2, min(sz1, sz2))
+	}
+	if IsFinite(left) || IsFinite(right) {
+		// If either stream is finite, then the zipped stream is finite.
+		return FiniteStream2(seq2)
+	}
+	// both streams are infinite
+	return InfiniteStream2(seq2)
 }
 
-// Collect returns a slice containing all elements of the sliceStream.
-func (it *sliceStream[D]) Collect() []D {
-	vs := make([]D, len(it.values))
-	copy(vs, it.values)
-	return vs
+// Swap2 takes a Stream2 with left and right elements, and returns a new Stream2 with the elements swapped.
+func Swap2[L, R any](stream2 Stream2[L, R]) Stream2[R, L] {
+	seq2 := func(yield func(R, L) bool) {
+		for k, v := range stream2.Seq2() {
+			if !yield(v, k) {
+				return
+			}
+		}
+	}
+	if sz := Size(stream2); sz != -1 {
+		return FiniteStream2WithSize(seq2, sz)
+	}
+	if IsFinite(stream2) {
+		return FiniteStream2(seq2)
+	}
+	return InfiniteStream2(seq2)
+}
+
+// ConvertToMap converts the Stream2 to a Map of L to R values.
+func ConvertToMap[K comparable, V any](stream2 Stream2[K, V]) map[K]V {
+	AssertFinite(stream2)
+	m := make(map[K]V)
+	for k, v := range stream2.Seq2() {
+		m[k] = v
+	}
+	return m
 }
